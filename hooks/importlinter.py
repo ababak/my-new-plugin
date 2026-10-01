@@ -2,7 +2,6 @@
 """PreToolUse hook: apply the pending edit to a temp copy and block it if import-linter fails."""
 
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -24,7 +23,9 @@ def log(outcome: str, tool_name: str | None, rel: Path | str, detail: str = "") 
 
 
 def violations(output: str) -> str:
-    return "\n".join(ln for ln in output.splitlines() if "->" in ln or "is not allowed" in ln)
+    return "\n".join(
+        ln for ln in output.splitlines() if "->" in ln or "is not allowed" in ln
+    )
 
 
 def apply_edit(text: str, old: str, new: str, replace_all: bool) -> str | None:
@@ -38,7 +39,9 @@ def pick(d: dict[str, Any], *keys: str) -> Any:
     return next((d[k] for k in keys if k in d), None)
 
 
-def planned_contents(tool_name: str | None, tool_input: dict[str, Any]) -> dict[Path, str] | None:
+def planned_contents(
+    tool_name: str | None, tool_input: dict[str, Any]
+) -> dict[Path, str] | None:
     """Content of every touched file after the tool runs; None if unsupported or not applicable."""
     contents: dict[Path, str] = {}
     if tool_name in ("Write", "create_file"):
@@ -46,7 +49,9 @@ def planned_contents(tool_name: str | None, tool_input: dict[str, Any]) -> dict[
         contents[path] = tool_input.get("content", "")
         return contents
     if tool_name == "MultiEdit":
-        edits = [{**e, "file_path": tool_input["file_path"]} for e in tool_input["edits"]]
+        edits = [
+            {**e, "file_path": tool_input["file_path"]} for e in tool_input["edits"]
+        ]
     elif tool_name == "multi_replace_string_in_file":
         edits = tool_input["replacements"]
     elif tool_name in ("Edit", "replace_string_in_file"):
@@ -70,6 +75,10 @@ def planned_contents(tool_name: str | None, tool_input: dict[str, Any]) -> dict[
     return contents
 
 
+def find_project_root(path: Path) -> Path | None:
+    return next((p for p in path.parents if (p / "pyproject.toml").is_file()), None)
+
+
 def run_linter(project_root: Path, cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["uv", "run", "--project", str(project_root), "lint-imports"],
@@ -84,20 +93,26 @@ def run_linter(project_root: Path, cwd: Path) -> subprocess.CompletedProcess[str
 def main() -> int:
     data = json.load(sys.stdin)
     tool_name = data.get("tool_name")
-    project_root = Path(os.environ.get("CLAUDE_PROJECT_DIR") or data.get("cwd", ".")).resolve()
 
     changes = planned_contents(tool_name, data.get("tool_input", {}))
     if not changes:
         return 0
+    # The hook's cwd is not the project in VS Code, so locate it from the edited file.
+    project_root = find_project_root(next(iter(changes)))
+    if project_root is None:
+        log("SKIP", tool_name, ", ".join(map(str, changes)), "no pyproject.toml found")
+        return 0
     updated: dict[Path, str] = {}
     for path, text in changes.items():
-        try:
-            rel = path.relative_to(project_root)
-        except ValueError:
-            continue
+        rel = path.relative_to(project_root)
         if path.suffix == ".py" and rel.parts[0] in LAYERS:
             updated[rel] = text
     if not updated:
+        log(
+            "SKIP",
+            tool_name,
+            ", ".join(str(p.relative_to(project_root)) for p in changes),
+        )
         return 0
     names = ", ".join(str(r) for r in updated)
     originals = {
